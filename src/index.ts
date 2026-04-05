@@ -1,0 +1,24 @@
+export { buildRuntimeConfig, deepMergeConfig, normalizeModelReference, parseModelSpec, parseRuntimeConfigContent } from "./config.js"
+export { createAgentRuntime, OpencodeAgentRuntime, OpencodeAgentSession, type Session } from "./runtime.js"
+export type {
+  AgentDefinition,
+  AgentErrorEvent,
+  AgentErrorInfo,
+  AgentQueryOptions,
+  AgentResponseEvent,
+  AgentResultEvent,
+  AgentRunOptions,
+  AgentRuntimeOptions,
+  AgentRuntimeRunOptions,
+  AgentSessionOptions,
+  AgentStatusEvent,
+  AgentTextEvent,
+  AgentToolCallEvent,
+  AgentTurnResult,
+  JsonArray,
+  JsonObject,
+  JsonPrimitive,
+  JsonValue,
+  ModelReference,
+  ModelSpec,
+} from "./types.js"

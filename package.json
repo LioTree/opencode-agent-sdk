@@ -1,0 +1,36 @@
+{
+  "name": "opencode-agent-sdk",
+  "version": "0.1.0",
+  "description": "High-level agent runtime built on top of @opencode-ai/sdk",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.2.15",
+    "opencode-ai": "^1.2.15"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  },
+  "keywords": [
+    "opencode",
+    "agent",
+    "sdk"
+  ],
+  "license": "MIT"
+}
