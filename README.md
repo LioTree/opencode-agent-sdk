@@ -38,28 +38,32 @@ Pass `rawConfigContent` if you want to override the inherited inline config cont
 - tool call lifecycle normalization
 - final assistant message lookup
 
-`opencode-agent-sdk` packages those concerns into a reusable runtime.
+`@liontree/opencode-agent-sdk` packages those concerns into a reusable runtime.
 
 ## Installation
 
 ```bash
-npm install @opencode-ai/sdk opencode-ai
+npm install @liontree/opencode-agent-sdk
 ```
 
-If you publish this package, install it as well:
+This package declares `@opencode-ai/sdk` and `opencode-ai` as dependencies, so you do not need to install them separately.
 
-```bash
-npm install opencode-agent-sdk
-```
+## Requirements
+
+- a working OpenCode provider/auth setup available through normal OpenCode config resolution or inline config passed to this SDK
 
 ## Quick Start
 
+```bash
+npm install @liontree/opencode-agent-sdk
+```
+
 ```ts
-import { createAgentRuntime } from "opencode-agent-sdk"
+import { createAgentRuntime } from "@liontree/opencode-agent-sdk"
 
 const runtime = await createAgentRuntime({
   directory: "/app",
-  model: "openai/gpt-4.1",
+  model: "openai/gpt-5.4",
   permission: {
     "*": "allow",
   },
@@ -133,6 +137,14 @@ const runtime = await createAgentRuntime({
     },
   },
 })
+```
+
+If you only need the final answer instead of a streamed event loop, use `run()`:
+
+```ts
+const result = await session.run("Summarize the current repository")
+
+console.log(result.text)
 ```
 
 ## Main API

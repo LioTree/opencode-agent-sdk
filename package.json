@@ -1,5 +1,5 @@
 {
-  "name": "opencode-agent-sdk",
+  "name": "@liontree/opencode-agent-sdk",
   "version": "0.1.0",
   "description": "High-level agent runtime built on top of @opencode-ai/sdk",
   "type": "module",
@@ -32,5 +32,13 @@
     "agent",
     "sdk"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LioTree/opencode-agent-sdk.git"
+  },
+  "homepage": "https://github.com/LioTree/opencode-agent-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/LioTree/opencode-agent-sdk/issues"
+  },
   "license": "MIT"
 }
