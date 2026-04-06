@@ -11,6 +11,22 @@ This package wraps OpenCode's lower-level session and SSE APIs with a more agent
 
 It is inspired by the usability level of Claude's agent SDK, but it does not try to be API-compatible 1:1.
 
+## Config behavior
+
+This SDK follows OpenCode's normal config resolution and adds programmatic overrides on top.
+
+- OpenCode still loads its normal config chain such as global config, project config, `.opencode/`, and managed config
+- if `OPENCODE_CONFIG_CONTENT` is already present in the parent process, this SDK inherits and merges it by default
+- options passed to `createAgentRuntime()` are applied as inline runtime overrides on top of the inherited config
+
+In practice, the resolved precedence for config passed through this SDK is:
+
+1. existing `OPENCODE_CONFIG_CONTENT` from the parent environment
+2. `options.config`
+3. SDK-managed overrides such as `agents`, `mcp`, `permission`, and `model`
+
+Pass `rawConfigContent` if you want to override the inherited inline config content explicitly.
+
 ## Why
 
 `@opencode-ai/sdk` is a solid transport/client layer, but most applications still need to rebuild the same higher-level pieces:
@@ -90,6 +106,35 @@ for await (const event of session.receiveResponse()) {
 await runtime.dispose()
 ```
 
+This example assumes your OpenCode provider/auth configuration is already available through OpenCode's normal config resolution, for example:
+
+- `~/.config/opencode/opencode.json`
+- `opencode.json` in the project
+- environment variables consumed by your provider config
+- existing `OPENCODE_CONFIG_CONTENT`
+
+If you want to provide inline config explicitly, pass `rawConfigContent` or `config`.
+
+```ts
+const runtime = await createAgentRuntime({
+  directory: "/app",
+  rawConfigContent: JSON.stringify({
+    provider: {
+      openai: {
+        options: {
+          apiKey: "{env:OPENAI_API_KEY}",
+        },
+      },
+    },
+  }),
+  agents: {
+    researcher: {
+      prompt: "You are a focused research agent.",
+    },
+  },
+})
+```
+
 ## Main API
 
 ### `createAgentRuntime(options)`
@@ -100,7 +145,7 @@ Creates a managed OpenCode runtime and injects:
 - optional default model
 - optional MCP config
 - optional permission config
-- optional extra config merged with `rawConfigContent`
+- optional extra config merged with inherited inline config
 
 ### `runtime.createSession({ agent, model })`
 

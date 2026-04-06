@@ -1,4 +1,11 @@
-export { buildRuntimeConfig, deepMergeConfig, normalizeModelReference, parseModelSpec, parseRuntimeConfigContent } from "./config.js"
+export {
+  buildRuntimeConfig,
+  deepMergeConfig,
+  normalizeModelReference,
+  parseModelSpec,
+  parseRuntimeConfigContent,
+  resolveInlineConfigContent,
+} from "./config.js"
 export { createAgentRuntime, OpencodeAgentRuntime, OpencodeAgentSession, type Session } from "./runtime.js"
 export type {
   AgentDefinition,

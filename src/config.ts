@@ -11,6 +11,8 @@ type BuildRuntimeConfigOptions = {
   rawConfigContent?: string
 }
 
+const INLINE_CONFIG_ENV_VAR = "OPENCODE_CONFIG_CONTENT"
+
 export function isPlainObject(value: JsonValue | object): value is PlainObject {
   return value !== null && typeof value === "object" && !Array.isArray(value)
 }
@@ -39,6 +41,14 @@ export function parseRuntimeConfigContent(raw?: string): PlainObject {
   }
 
   return parsed
+}
+
+export function resolveInlineConfigContent(raw?: string) {
+  if (typeof raw === "string") {
+    return raw
+  }
+
+  return process.env[INLINE_CONFIG_ENV_VAR]
 }
 
 export function normalizeModelReference(model: ModelReference): ModelSpec {
@@ -97,7 +107,7 @@ export function buildRuntimeConfig({
   permission,
   rawConfigContent,
 }: BuildRuntimeConfigOptions): PlainObject {
-  const envConfig = parseRuntimeConfigContent(rawConfigContent)
+  const inheritedInlineConfig = parseRuntimeConfigContent(resolveInlineConfigContent(rawConfigContent))
   const optionConfig = config ?? {}
 
   const managedConfig: PlainObject = {
@@ -116,5 +126,5 @@ export function buildRuntimeConfig({
     managedConfig.model = toModelString(model)
   }
 
-  return deepMergeConfig(deepMergeConfig(envConfig, optionConfig), managedConfig)
+  return deepMergeConfig(deepMergeConfig(inheritedInlineConfig, optionConfig), managedConfig)
 }
