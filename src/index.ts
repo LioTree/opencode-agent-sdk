@@ -11,6 +11,8 @@ export type {
   AgentDefinition,
   AgentErrorEvent,
   AgentErrorInfo,
+  AgentEventSource,
+  AgentMode,
   AgentQueryOptions,
   AgentResponseEvent,
   AgentResultEvent,
@@ -28,4 +30,6 @@ export type {
   JsonValue,
   ModelReference,
   ModelSpec,
+  ResumeAgentOptions,
+  RuntimeAgentInfo,
 } from "./types.js"

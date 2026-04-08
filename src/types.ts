@@ -1,4 +1,4 @@
-import type { Message, Part, ToolState } from "@opencode-ai/sdk/v2"
+import type { Agent as OpencodeAgent, Message, Part, ToolState } from "@opencode-ai/sdk/v2"
 
 export type JsonPrimitive = boolean | null | number | string
 export type JsonValue = JsonArray | JsonObject | JsonPrimitive
@@ -12,15 +12,18 @@ export type ModelSpec = {
 
 export type ModelReference = ModelSpec | `${string}/${string}`
 
+export type AgentMode = "all" | "primary" | "subagent"
+
 export type AgentDefinition = {
   description?: string
   model?: ModelReference
-  mode?: string
+  mode?: AgentMode
+  permission?: JsonObject
   prompt: string
 }
 
 export type AgentRuntimeOptions = {
-  agents: Record<string, AgentDefinition>
+  agents?: Record<string, AgentDefinition>
   config?: JsonObject
   directory: string
   hostname?: string
@@ -37,13 +40,22 @@ export type AgentSessionOptions = {
   model?: ModelReference
 }
 
-export type AgentQueryOptions = AgentSessionOptions
-export type AgentRunOptions = AgentSessionOptions
+export type AgentQueryOptions = AgentSessionOptions & {
+  includeSubagents?: boolean
+}
+
+export type AgentRunOptions = AgentQueryOptions
 
 export type AgentRuntimeRunOptions = {
   agent: string
   model?: ModelReference
   prompt: string
+}
+
+export type ResumeAgentOptions = AgentSessionOptions & {
+  includeSubagents?: boolean
+  prompt?: string
+  sessionID: string
 }
 
 export type AgentErrorInfo = {
@@ -54,10 +66,28 @@ export type AgentErrorInfo = {
   statusCode?: number
 }
 
+export type AgentEventSource = {
+  agentLabel: string
+  agentType: string
+  chain: string[]
+  chainText: string
+  depth: number
+  parentSessionID: string | null
+  rootSessionID: string
+  sessionID: string
+  sourceToolCallID: string | null
+  taskID: string | null
+}
+
+export type RuntimeAgentInfo = Pick<OpencodeAgent, "color" | "description" | "hidden" | "mode" | "name" | "native" | "steps"> & {
+  model?: ModelSpec
+}
+
 export type AgentStatusEvent = {
   agent: string
   sessionID: string
   status: string
+  source: AgentEventSource
   type: "status"
 }
 
@@ -67,6 +97,7 @@ export type AgentTextEvent = {
   messageID: string
   partID: string
   sessionID: string
+  source: AgentEventSource
   text: string
   type: "text"
 }
@@ -81,6 +112,7 @@ export type AgentToolCallEvent = {
   output?: string
   partID: string
   sessionID: string
+  source: AgentEventSource
   status: ToolState["status"]
   title?: string
   toolName: string
@@ -91,6 +123,7 @@ export type AgentErrorEvent = {
   agent: string
   error: AgentErrorInfo
   sessionID: string
+  source: AgentEventSource
   type: "error"
 }
 
@@ -101,6 +134,7 @@ export type AgentTurnResult = {
   messageID: string | null
   parts: Part[]
   sessionID: string
+  source: AgentEventSource
   text: string
 }
 
@@ -108,6 +142,7 @@ export type AgentResultEvent = {
   agent: string
   result: AgentTurnResult
   sessionID: string
+  source: AgentEventSource
   type: "result"
 }
 

@@ -3,7 +3,7 @@ import type { AgentDefinition, JsonObject, JsonValue, ModelReference, ModelSpec 
 export type PlainObject = JsonObject
 
 type BuildRuntimeConfigOptions = {
-  agents: Record<string, AgentDefinition>
+  agents?: Record<string, AgentDefinition>
   config?: PlainObject
   mcp?: PlainObject
   model?: ModelReference
@@ -93,6 +93,15 @@ function buildAgentConfig(agents: Record<string, AgentDefinition>): PlainObject 
       mode: definition.mode ?? "primary",
       prompt: definition.prompt,
     }
+    if (definition.description) {
+      config.description = definition.description
+    }
+    if (definition.model) {
+      config.model = toModelString(definition.model)
+    }
+    if (definition.permission) {
+      config.permission = definition.permission
+    }
     return [name, config] as const
   })
 
@@ -107,11 +116,12 @@ export function buildRuntimeConfig({
   permission,
   rawConfigContent,
 }: BuildRuntimeConfigOptions): PlainObject {
+  const resolvedAgents = agents ?? {}
   const inheritedInlineConfig = parseRuntimeConfigContent(resolveInlineConfigContent(rawConfigContent))
   const optionConfig = config ?? {}
 
   const managedConfig: PlainObject = {
-    agent: buildAgentConfig(agents),
+    agent: buildAgentConfig(resolvedAgents),
   }
 
   if (mcp) {

@@ -4,9 +4,11 @@ import {
   type EventMessagePartDelta,
   type EventMessagePartUpdated,
   type EventMessageUpdated,
+  type EventSessionCreated,
   type EventSessionError,
   type EventSessionIdle,
   type EventSessionStatus,
+  type EventSessionUpdated,
   type Message,
   type OpencodeClient,
   type Part,
@@ -19,6 +21,7 @@ import { buildRuntimeConfig, normalizeModelReference, parseModelSpec } from "./c
 import type {
   AgentDefinition,
   AgentErrorInfo,
+  AgentEventSource,
   AgentQueryOptions,
   AgentResponseEvent,
   AgentRunOptions,
@@ -30,6 +33,8 @@ import type {
   AgentTurnResult,
   ModelReference,
   ModelSpec,
+  ResumeAgentOptions,
+  RuntimeAgentInfo,
 } from "./types.js"
 import { delay, extractTextFromParts, formatErrorInfo, requireData, toErrorInfo } from "./utils.js"
 
@@ -41,9 +46,11 @@ type SessionEvent =
   | EventMessagePartDelta
   | EventMessagePartUpdated
   | EventMessageUpdated
+  | EventSessionCreated
   | EventSessionError
   | EventSessionIdle
   | EventSessionStatus
+  | EventSessionUpdated
 
 type EventSubscription = {
   abort: () => void
@@ -58,12 +65,22 @@ type IdleGate = {
 
 type TurnContext = {
   assistantMessageIDs: Set<string>
+  hasAssistantMessage: boolean
   idleGate: IdleGate
-  lastStatus: string
-  latestAssistantMessageID: string | null
+  lastStatusBySessionID: Map<string, string>
+  latestRootAssistantMessageID: string | null
   sawBusy: boolean
   textByPartID: Map<string, string>
+  trackedSessionIDs: Set<string>
   toolStatusByPartID: Map<string, ToolState["status"]>
+}
+
+type SessionNode = {
+  agentType: string | null
+  parentSessionID: string | null
+  sessionID: string
+  sourceToolCallID: string | null
+  title: string | null
 }
 
 const POST_IDLE_EVENT_DRAIN_MS = 300
@@ -74,9 +91,11 @@ function isSessionEvent(event: Event): event is SessionEvent {
     event.type === "message.part.updated" ||
     event.type === "message.part.delta" ||
     event.type === "message.updated" ||
+    event.type === "session.created" ||
     event.type === "session.status" ||
     event.type === "session.idle" ||
-    event.type === "session.error"
+    event.type === "session.error" ||
+    event.type === "session.updated"
   )
 }
 
@@ -88,13 +107,48 @@ function getEventSessionID(event: SessionEvent) {
       return event.properties.sessionID
     case "message.updated":
       return event.properties.info.sessionID
+    case "session.created":
+      return event.properties.info.id
     case "session.status":
       return event.properties.sessionID
     case "session.idle":
       return event.properties.sessionID
     case "session.error":
       return event.properties.sessionID
+    case "session.updated":
+      return event.properties.info.id
   }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object"
+}
+
+function getRecordString(value: unknown, key: string) {
+  if (!isRecord(value)) {
+    return null
+  }
+
+  const candidate = value[key]
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : null
+}
+
+function parseSubagentFromTitle(title: string | null | undefined) {
+  if (!title) {
+    return null
+  }
+
+  const match = /\(@([^()]+) subagent\)$/.exec(title.trim())
+  return match?.[1] ?? null
+}
+
+function compareSessionNodes(a: SessionNode, b: SessionNode, sessionInfoCache: ReadonlyMap<string, Session>) {
+  const aCreated = sessionInfoCache.get(a.sessionID)?.time.created ?? Number.MAX_SAFE_INTEGER
+  const bCreated = sessionInfoCache.get(b.sessionID)?.time.created ?? Number.MAX_SAFE_INTEGER
+  if (aCreated !== bCreated) {
+    return aCreated - bCreated
+  }
+  return a.sessionID.localeCompare(b.sessionID)
 }
 
 function createIdleGate(): IdleGate {
@@ -115,14 +169,16 @@ function createIdleGate(): IdleGate {
   }
 }
 
-function createTurnContext(): TurnContext {
+function createTurnContext(rootSessionID: string): TurnContext {
   return {
     assistantMessageIDs: new Set<string>(),
+    hasAssistantMessage: false,
     idleGate: createIdleGate(),
-    lastStatus: "",
-    latestAssistantMessageID: null,
+    lastStatusBySessionID: new Map<string, string>([[rootSessionID, "pending"]]),
+    latestRootAssistantMessageID: null,
     sawBusy: false,
     textByPartID: new Map<string, string>(),
+    trackedSessionIDs: new Set<string>([rootSessionID]),
     toolStatusByPartID: new Map<string, ToolState["status"]>(),
   }
 }
@@ -214,8 +270,10 @@ class ActiveTurn {
       agent: string
       client: OpencodeClient
       directory: string
+      includeSubagents: boolean
       model: ModelSpec
       prompt: string
+      runtime: OpencodeAgentRuntime
       sessionID: string
     },
   ) {
@@ -241,49 +299,73 @@ class ActiveTurn {
     this.queue.push(event)
   }
 
-  private emitError(error: unknown) {
+  private getEventSource(sessionID: string, fallbackAgentType?: string) {
+    const rootFallback = sessionID === this.args.sessionID ? this.args.agent : undefined
+    return this.args.runtime.getKnownEventSource(sessionID, fallbackAgentType ?? rootFallback)
+  }
+
+  private emitError(error: unknown, sessionID = this.args.sessionID, fallbackAgentType?: string) {
+    const source = this.getEventSource(sessionID, fallbackAgentType)
     this.emit({
       type: "error",
-      agent: this.args.agent,
-      sessionID: this.args.sessionID,
+      agent: source.agentType,
+      sessionID,
+      source,
       error: toErrorInfo(error),
     })
   }
 
   private markIdleIfReady(context: TurnContext) {
-    if (context.sawBusy || context.latestAssistantMessageID !== null) {
+    if (context.sawBusy || context.hasAssistantMessage) {
+      if (this.args.includeSubagents) {
+        for (const sessionID of context.trackedSessionIDs) {
+          if (context.lastStatusBySessionID.get(sessionID) !== "idle") {
+            return
+          }
+        }
+      }
       context.idleGate.mark()
     }
   }
 
-  private emitStatus(context: TurnContext, status: string) {
-    if (!status || status === context.lastStatus) {
+  private emitStatus(sessionID: string, context: TurnContext, status: string, fallbackAgentType?: string) {
+    const previous = context.lastStatusBySessionID.get(sessionID) ?? ""
+    if (!status || status === previous) {
       return
     }
 
-    context.lastStatus = status
+    context.lastStatusBySessionID.set(sessionID, status)
+    const source = this.getEventSource(sessionID, fallbackAgentType)
     this.emit({
       type: "status",
-      agent: this.args.agent,
-      sessionID: this.args.sessionID,
+      agent: source.agentType,
+      sessionID,
+      source,
       status,
     })
   }
 
-  private emitTextEvent(event: Omit<AgentTextEvent, "agent" | "sessionID" | "type">) {
+  private emitTextEvent(sessionID: string, event: Omit<AgentTextEvent, "agent" | "sessionID" | "source" | "type">) {
+    const source = this.getEventSource(sessionID)
     this.emit({
       type: "text",
-      agent: this.args.agent,
-      sessionID: this.args.sessionID,
+      agent: source.agentType,
+      sessionID,
+      source,
       ...event,
     })
   }
 
-  private emitToolCallEvent(event: Omit<AgentToolCallEvent, "agent" | "sessionID" | "type">) {
+  private emitToolCallEvent(
+    sessionID: string,
+    event: Omit<AgentToolCallEvent, "agent" | "sessionID" | "source" | "type">,
+  ) {
+    const source = this.getEventSource(sessionID)
     this.emit({
       type: "tool_call",
-      agent: this.args.agent,
-      sessionID: this.args.sessionID,
+      agent: source.agentType,
+      sessionID,
+      source,
       ...event,
     })
   }
@@ -295,7 +377,7 @@ class ActiveTurn {
 
     const previous = context.textByPartID.get(event.properties.partID) ?? ""
     context.textByPartID.set(event.properties.partID, `${previous}${event.properties.delta}`)
-    this.emitTextEvent({
+    this.emitTextEvent(event.properties.sessionID, {
       format: "delta",
       messageID: event.properties.messageID,
       partID: event.properties.partID,
@@ -321,7 +403,7 @@ class ActiveTurn {
       return
     }
 
-    this.emitTextEvent({
+    this.emitTextEvent(part.sessionID, {
       format,
       messageID: part.messageID,
       partID: part.id,
@@ -336,7 +418,7 @@ class ActiveTurn {
     }
 
     context.toolStatusByPartID.set(part.id, status)
-    const event: Omit<AgentToolCallEvent, "agent" | "sessionID" | "type"> = {
+    const event: Omit<AgentToolCallEvent, "agent" | "sessionID" | "source" | "type"> = {
       attachments: 0,
       callID: part.callID,
       input: part.state.input,
@@ -360,33 +442,107 @@ class ActiveTurn {
       event.error = part.state.error
     }
 
-    this.emitToolCallEvent({
+    this.emitToolCallEvent(part.sessionID, {
       ...event,
     })
   }
 
+  private extractTaskChildSessionID(part: ToolPart) {
+    if (part.tool !== "task") {
+      return null
+    }
+
+    const metadata = "metadata" in part.state ? part.state.metadata : undefined
+    return getRecordString(metadata, "sessionId") ?? getRecordString(part.state.input, "task_id")
+  }
+
+  private extractTaskAgentType(part: ToolPart) {
+    if (part.tool !== "task") {
+      return null
+    }
+    return getRecordString(part.state.input, "subagent_type")
+  }
+
+  private trackDiscoveredSessions(event: SessionEvent, context: TurnContext) {
+    switch (event.type) {
+      case "session.created":
+      case "session.updated": {
+        this.args.runtime.trackSessionInfo(event.properties.info)
+        if (
+          this.args.includeSubagents &&
+          event.properties.info.parentID &&
+          context.trackedSessionIDs.has(event.properties.info.parentID)
+        ) {
+          context.trackedSessionIDs.add(event.properties.info.id)
+          if (!context.lastStatusBySessionID.has(event.properties.info.id)) {
+            context.lastStatusBySessionID.set(event.properties.info.id, "pending")
+          }
+        }
+        return
+      }
+      case "message.updated":
+        this.args.runtime.trackSessionAgentType(event.properties.info.sessionID, event.properties.info.agent)
+        return
+      case "message.part.updated": {
+        if (!this.args.includeSubagents || event.properties.part.type !== "tool") {
+          return
+        }
+
+        const part = event.properties.part
+        if (!context.trackedSessionIDs.has(part.sessionID)) {
+          return
+        }
+
+        const childSessionID = this.extractTaskChildSessionID(part)
+        if (!childSessionID) {
+          return
+        }
+
+        this.args.runtime.trackTaskSessionLink({
+          agentType: this.extractTaskAgentType(part),
+          childSessionID,
+          parentSessionID: part.sessionID,
+          sourceToolCallID: part.callID,
+        })
+        context.trackedSessionIDs.add(childSessionID)
+        if (!context.lastStatusBySessionID.has(childSessionID)) {
+          context.lastStatusBySessionID.set(childSessionID, "pending")
+        }
+        return
+      }
+      default:
+        return
+    }
+  }
+
   private handleSessionEvent(event: SessionEvent, context: TurnContext) {
     switch (event.type) {
+      case "session.created":
+      case "session.updated":
+        return
       case "session.status":
         if (event.properties.status.type === "busy") {
           context.sawBusy = true
         }
+        this.emitStatus(event.properties.sessionID, context, event.properties.status.type)
         if (event.properties.status.type === "idle") {
           this.markIdleIfReady(context)
         }
-        this.emitStatus(context, event.properties.status.type)
         return
       case "session.idle":
         this.markIdleIfReady(context)
-        this.emitStatus(context, "idle")
+        this.emitStatus(event.properties.sessionID, context, "idle")
         return
       case "session.error":
-        this.emitError(event.properties.error)
+        this.emitError(event.properties.error, event.properties.sessionID)
         return
       case "message.updated":
         if (event.properties.info.role === "assistant") {
           context.assistantMessageIDs.add(event.properties.info.id)
-          context.latestAssistantMessageID = event.properties.info.id
+          context.hasAssistantMessage = true
+          if (event.properties.info.sessionID === this.args.sessionID) {
+            context.latestRootAssistantMessageID = event.properties.info.id
+          }
         }
         return
       case "message.part.delta":
@@ -484,13 +640,16 @@ class ActiveTurn {
   }
 
   private async run() {
-    const context = createTurnContext()
+    await this.args.runtime.primeSessionLineage(this.args.sessionID, this.args.agent)
+    const context = createTurnContext(this.args.sessionID)
     const events = await this.subscribeToEvents()
 
     const consumeTask = (async () => {
       try {
         for await (const event of events.stream) {
-          if (getEventSessionID(event) !== this.args.sessionID) {
+          this.trackDiscoveredSessions(event, context)
+          const sessionID = getEventSessionID(event)
+          if (!sessionID || !context.trackedSessionIDs.has(sessionID)) {
             continue
           }
           this.handleSessionEvent(event, context)
@@ -522,12 +681,7 @@ class ActiveTurn {
       await context.idleGate.signal
     } catch (error) {
       turnError = toErrorInfo(error)
-      this.emit({
-        type: "error",
-        agent: this.args.agent,
-        sessionID: this.args.sessionID,
-        error: turnError,
-      })
+      this.emitError(turnError)
     } finally {
       await delay(POST_IDLE_EVENT_DRAIN_MS)
       events.abort()
@@ -545,12 +699,7 @@ class ActiveTurn {
       } catch (error) {
         const shutdownError = toErrorInfo(error)
         turnError ??= shutdownError
-        this.emit({
-          type: "error",
-          agent: this.args.agent,
-          sessionID: this.args.sessionID,
-          error: shutdownError,
-        })
+        this.emitError(shutdownError)
       } finally {
         if (shutdownTimer) {
           clearTimeout(shutdownTimer)
@@ -559,14 +708,16 @@ class ActiveTurn {
     }
 
     try {
-      const resolved = await this.resolveLatestAssistantMessage(this.args.sessionID, context.latestAssistantMessageID)
+      const resolved = await this.resolveLatestAssistantMessage(this.args.sessionID, context.latestRootAssistantMessageID)
+      const source = this.getEventSource(this.args.sessionID, this.args.agent)
       const result: AgentTurnResult = {
-        agent: this.args.agent,
+        agent: source.agentType,
         error: turnError ?? getAssistantMessageError(resolved.info),
         info: resolved.info,
-        messageID: resolved.info?.id ?? context.latestAssistantMessageID,
+        messageID: resolved.info?.id ?? context.latestRootAssistantMessageID,
         parts: resolved.parts,
         sessionID: this.args.sessionID,
+        source,
         text: extractTextFromParts(resolved.parts),
       }
 
@@ -574,19 +725,14 @@ class ActiveTurn {
         this.finalResult = result
         this.emit({
           type: "result",
-          agent: this.args.agent,
+          agent: source.agentType,
           sessionID: this.args.sessionID,
+          source,
           result,
         })
       }
     } catch (error) {
-      const resolveError = toErrorInfo(error)
-      this.emit({
-        type: "error",
-        agent: this.args.agent,
-        sessionID: this.args.sessionID,
-        error: resolveError,
-      })
+      this.emitError(toErrorInfo(error))
     } finally {
       this.queue.close()
     }
@@ -619,13 +765,16 @@ export class OpencodeAgentSession {
         throw new Error("No agent selected. Pass agent to createSession(), query(), or run().")
       }
 
+      this.runtime.trackSessionAgentType(this.id, agent, true)
       const model = await this.runtime.resolveModel(agent, options.model ?? this.defaultModel)
       this.activeTurn = new ActiveTurn({
         agent,
         client: this.runtime.client,
         directory: this.runtime.directory,
+        includeSubagents: options.includeSubagents ?? false,
         model,
         prompt,
+        runtime: this.runtime,
         sessionID: this.id,
       })
     } finally {
@@ -676,6 +825,10 @@ export class OpencodeAgentSession {
     throw new Error("Agent turn completed without a final result")
   }
 
+  async runAgent(prompt: string, options: AgentRunOptions = {}) {
+    return this.run(prompt, options)
+  }
+
   async abort() {
     await requireData(
       "session.abort",
@@ -694,6 +847,9 @@ export class OpencodeAgentSession {
 export class OpencodeAgentRuntime {
   private disposed = false
   private readonly agentDefinitions: ReadonlyMap<string, AgentDefinition>
+  private runtimeAgentsPromise: Promise<RuntimeAgentInfo[]> | null = null
+  private readonly sessionInfoCache = new Map<string, Session>()
+  private readonly sessionNodeCache = new Map<string, SessionNode>()
 
   constructor(
     readonly client: OpencodeClient,
@@ -703,6 +859,181 @@ export class OpencodeAgentRuntime {
     private readonly defaultModel?: ModelReference,
   ) {
     this.agentDefinitions = new Map(Object.entries(agents))
+  }
+
+  private getSessionNode(sessionID: string) {
+    let node = this.sessionNodeCache.get(sessionID)
+    if (!node) {
+      node = {
+        agentType: null,
+        parentSessionID: null,
+        sessionID,
+        sourceToolCallID: null,
+        title: null,
+      }
+      this.sessionNodeCache.set(sessionID, node)
+    }
+    return node
+  }
+
+  private getSiblingOrdinal(node: SessionNode) {
+    if (!node.parentSessionID || !node.agentType) {
+      return null
+    }
+
+    const siblings = [...this.sessionNodeCache.values()]
+      .filter((candidate) => candidate.parentSessionID === node.parentSessionID && candidate.agentType === node.agentType)
+      .sort((left, right) => compareSessionNodes(left, right, this.sessionInfoCache))
+
+    const index = siblings.findIndex((candidate) => candidate.sessionID === node.sessionID)
+    return index >= 0 ? index + 1 : null
+  }
+
+  trackSessionInfo(session: Session) {
+    this.sessionInfoCache.set(session.id, session)
+    const node = this.getSessionNode(session.id)
+    node.parentSessionID = session.parentID ?? null
+    node.title = session.title
+
+    const titleAgent = parseSubagentFromTitle(session.title)
+    if (titleAgent && !node.agentType) {
+      node.agentType = titleAgent
+    }
+  }
+
+  trackSessionAgentType(sessionID: string, agentType: string, force = false) {
+    if (!agentType) {
+      return
+    }
+    const node = this.getSessionNode(sessionID)
+    if (force || !node.agentType) {
+      node.agentType = agentType
+    }
+  }
+
+  trackTaskSessionLink(input: {
+    agentType: string | null
+    childSessionID: string
+    parentSessionID: string
+    sourceToolCallID: string | null
+  }) {
+    const node = this.getSessionNode(input.childSessionID)
+    if (!node.parentSessionID) {
+      node.parentSessionID = input.parentSessionID
+    }
+    if (!node.sourceToolCallID && input.sourceToolCallID) {
+      node.sourceToolCallID = input.sourceToolCallID
+    }
+    if (!node.agentType && input.agentType) {
+      node.agentType = input.agentType
+    }
+  }
+
+  async getSessionInfo(sessionID: string) {
+    const cached = this.sessionInfoCache.get(sessionID)
+    if (cached) {
+      return cached
+    }
+
+    const session = await requireData(
+      "session.get",
+      this.client.session.get({
+        sessionID,
+        directory: this.directory,
+      }),
+    )
+    this.trackSessionInfo(session)
+    return session
+  }
+
+  async ensureSessionAgentType(sessionID: string, fallbackAgentType?: string) {
+    const node = this.getSessionNode(sessionID)
+    if (node.agentType) {
+      return node.agentType
+    }
+
+    const titleAgent = parseSubagentFromTitle(node.title)
+    if (titleAgent) {
+      node.agentType = titleAgent
+      return node.agentType
+    }
+
+    try {
+      const messages = await requireData(
+        "session.messages",
+        this.client.session.messages({
+          sessionID,
+          directory: this.directory,
+        }),
+      )
+      const messageWithAgent = [...messages]
+        .reverse()
+        .find((entry) => typeof entry.info.agent === "string" && entry.info.agent.length > 0)
+      if (messageWithAgent?.info.agent) {
+        node.agentType = messageWithAgent.info.agent
+        return node.agentType
+      }
+    } catch {
+      // Ignore cache warm-up failures and fall back below.
+    }
+
+    if (fallbackAgentType) {
+      node.agentType = fallbackAgentType
+      return node.agentType
+    }
+
+    return null
+  }
+
+  async primeSessionLineage(sessionID: string, fallbackAgentType?: string) {
+    let currentSessionID: string | null = sessionID
+    while (currentSessionID) {
+      const session = await this.getSessionInfo(currentSessionID)
+      await this.ensureSessionAgentType(currentSessionID, currentSessionID === sessionID ? fallbackAgentType : undefined)
+      currentSessionID = session.parentID ?? null
+    }
+  }
+
+  getKnownEventSource(sessionID: string, fallbackAgentType?: string): AgentEventSource {
+    const leaf = this.getSessionNode(sessionID)
+    if (!leaf.agentType && fallbackAgentType) {
+      leaf.agentType = fallbackAgentType
+    }
+
+    const lineage: SessionNode[] = []
+    const seen = new Set<string>()
+    let cursor: SessionNode | undefined = leaf
+
+    while (cursor && !seen.has(cursor.sessionID)) {
+      lineage.push(cursor)
+      seen.add(cursor.sessionID)
+      cursor = cursor.parentSessionID ? this.sessionNodeCache.get(cursor.parentSessionID) : undefined
+    }
+
+    const ordered = lineage.reverse()
+    const chain = ordered.map((node, index) => {
+      const agentType = node.agentType ?? (node.sessionID === sessionID ? fallbackAgentType : undefined) ?? "unknown"
+      if (index === 0) {
+        return agentType
+      }
+
+      const ordinal = this.getSiblingOrdinal(node)
+      return ordinal ? `${agentType}#${ordinal}` : agentType
+    })
+
+    const agentType = leaf.agentType ?? fallbackAgentType ?? "unknown"
+    return {
+      agentLabel: chain[chain.length - 1] ?? agentType,
+      agentType,
+      chain,
+      chainText: chain.join(" -> "),
+      depth: Math.max(chain.length - 1, 0),
+      parentSessionID: leaf.parentSessionID,
+      rootSessionID: ordered[0]?.sessionID ?? sessionID,
+      sessionID,
+      sourceToolCallID: leaf.sourceToolCallID,
+      taskID: leaf.parentSessionID ? sessionID : null,
+    }
   }
 
   async dispose() {
@@ -721,9 +1052,59 @@ export class OpencodeAgentRuntime {
     return agent
   }
 
+  async listAgents(): Promise<RuntimeAgentInfo[]> {
+    if (!this.runtimeAgentsPromise) {
+      this.runtimeAgentsPromise = requireData(
+        "app.agents",
+        this.client.app.agents({
+          directory: this.directory,
+        }),
+      ).then((agents) =>
+        agents.map((agent) => {
+          const info: RuntimeAgentInfo = {
+            mode: agent.mode,
+            name: agent.name,
+          }
+
+          if (agent.color) {
+            info.color = agent.color
+          }
+          if (agent.description) {
+            info.description = agent.description
+          }
+          if (typeof agent.hidden === "boolean") {
+            info.hidden = agent.hidden
+          }
+          if (agent.model) {
+            info.model = {
+              modelID: agent.model.modelID,
+              providerID: agent.model.providerID,
+            }
+          }
+          if (typeof agent.native === "boolean") {
+            info.native = agent.native
+          }
+          if (typeof agent.steps === "number") {
+            info.steps = agent.steps
+          }
+
+          return info
+        }),
+      )
+    }
+
+    return this.runtimeAgentsPromise
+  }
+
+  private async getRuntimeAgentInfo(name: string) {
+    const agents = await this.listAgents()
+    return agents.find((agent) => agent.name === name) ?? null
+  }
+
   async resolveModel(agentName: string, override?: ModelReference): Promise<ModelSpec> {
-    const agentModel = this.getAgent(agentName).model
-    const selected = override ?? agentModel ?? this.defaultModel
+    const configuredModel = this.agentDefinitions.get(agentName)?.model
+    const runtimeModel = (await this.getRuntimeAgentInfo(agentName))?.model
+    const selected = override ?? configuredModel ?? runtimeModel ?? this.defaultModel
     if (selected) {
       return normalizeModelReference(selected)
     }
@@ -743,6 +1124,17 @@ export class OpencodeAgentRuntime {
     return resolved
   }
 
+  async openSession(sessionID: string, options: AgentSessionOptions = {}) {
+    const session = await this.getSessionInfo(sessionID)
+    await this.primeSessionLineage(sessionID, options.agent)
+    const defaultAgent = (await this.ensureSessionAgentType(
+      sessionID,
+      options.agent ?? parseSubagentFromTitle(session.title) ?? undefined,
+    )) ?? undefined
+
+    return new OpencodeAgentSession(this, sessionID, defaultAgent, options.model)
+  }
+
   async createSession(options: AgentSessionOptions = {}) {
     if (this.disposed) {
       throw new Error("Runtime has been disposed")
@@ -755,6 +1147,11 @@ export class OpencodeAgentRuntime {
       }),
     )
 
+    this.trackSessionInfo(session)
+    if (options.agent) {
+      this.trackSessionAgentType(session.id, options.agent)
+    }
+
     return new OpencodeAgentSession(this, session.id, options.agent, options.model)
   }
 
@@ -766,11 +1163,31 @@ export class OpencodeAgentRuntime {
     const session = await this.createSession(sessionOptions)
     return session.run(options.prompt)
   }
+
+  async runAgent(options: AgentRuntimeRunOptions) {
+    return this.run(options)
+  }
+
+  async resumeAgent(options: ResumeAgentOptions) {
+    const session = await this.openSession(options.sessionID, {
+      ...(options.agent ? { agent: options.agent } : {}),
+      ...(options.model ? { model: options.model } : {}),
+    })
+    if (options.prompt) {
+      await session.query(options.prompt, {
+        ...(options.agent ? { agent: options.agent } : {}),
+        ...(typeof options.includeSubagents === "boolean" ? { includeSubagents: options.includeSubagents } : {}),
+        ...(options.model ? { model: options.model } : {}),
+      })
+    }
+    return session
+  }
 }
 
 export async function createAgentRuntime(options: AgentRuntimeOptions) {
+  const agents = options.agents ?? {}
   const runtimeConfig = buildRuntimeConfig({
-    agents: options.agents,
+    agents,
     ...(options.config ? { config: options.config } : {}),
     ...(options.mcp ? { mcp: options.mcp } : {}),
     ...(options.model ? { model: options.model } : {}),
@@ -785,7 +1202,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions) {
     config: runtimeConfig,
   })
 
-  return new OpencodeAgentRuntime(client, options.directory, options.agents, server, options.model)
+  return new OpencodeAgentRuntime(client, options.directory, agents, server, options.model)
 }
 
 export type { Session }
