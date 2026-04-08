@@ -6,7 +6,7 @@ This package wraps OpenCode's lower-level session and SSE APIs with a more agent
 
 - declare agents once
 - create reusable sessions
-- call `query()` / `receiveResponse()` or `run()`
+- call `query()` / `receiveResponse()` or `runAgent()`
 - consume normalized text, tool-call, status, error, and final-result events
 
 It is inspired by the usability level of Claude's agent SDK, but it does not try to be API-compatible 1:1.
@@ -58,15 +58,14 @@ This package declares `@opencode-ai/sdk` and `opencode-ai` as dependencies, so y
 npm install @liontree/opencode-agent-sdk
 ```
 
+See `examples/subagents.ts` for a complete subagent lineage and `resumeAgent()` example.
+
 ```ts
 import { createAgentRuntime } from "@liontree/opencode-agent-sdk"
 
 const runtime = await createAgentRuntime({
   directory: "/app",
   model: "openai/gpt-5.4",
-  permission: {
-    "*": "allow",
-  },
   mcp: {
     terminal: {
       type: "remote",
@@ -139,13 +138,62 @@ const runtime = await createAgentRuntime({
 })
 ```
 
-If you only need the final answer instead of a streamed event loop, use `run()`:
+If you only need the final answer instead of a streamed event loop, use `runAgent()`:
 
 ```ts
-const result = await session.run("Summarize the current repository")
+const result = await session.runAgent("Summarize the current repository")
 
 console.log(result.text)
 ```
+
+To stream descendant subagent activity in the same turn, pass `includeSubagents: true` and read `event.source.chainText`:
+
+```ts
+await session.query("Investigate the auth flow", { includeSubagents: true })
+
+for await (const event of session.receiveResponse()) {
+  if (event.type === "tool_call") {
+    console.log(`[${event.source.chainText}]`, event.toolName, event.status)
+  }
+}
+```
+
+You can also reopen an existing session and optionally continue it with another turn:
+
+```ts
+const reopened = await runtime.resumeAgent({
+  sessionID: "sess_123",
+  prompt: "Continue from the last auth findings.",
+})
+
+for await (const event of reopened.receiveResponse()) {
+  if (event.type === "text") {
+    process.stdout.write(event.text)
+  }
+}
+```
+
+If you want a subagent to be able to launch another subagent via the `task` tool, you must allow it in that agent's permissions. OpenCode controls `task` separately from normal read/edit/bash permissions.
+
+```ts
+const runtime = await createAgentRuntime({
+  directory: "/app",
+  model: "openai/gpt-5.4",
+  config: {
+    agent: {
+      general: {
+        permission: {
+          task: {
+            "*": "allow",
+          },
+        },
+      },
+    },
+  },
+})
+```
+
+Use `config.agent.<name>.permission.task` when you want to override a built-in agent such as `general`. For custom agents declared in `options.agents`, you can also set `permission` directly on the agent definition.
 
 ## Main API
 
@@ -163,9 +211,28 @@ Creates a managed OpenCode runtime and injects:
 
 Creates a reusable OpenCode session and returns an `OpencodeAgentSession`.
 
+### `runtime.openSession(sessionID, { agent, model })`
+
+Opens an existing OpenCode session and returns an `OpencodeAgentSession` handle.
+
+### `runtime.listAgents()`
+
+Lists the agents currently available from the OpenCode runtime, including built-in subagents such as `general` and `explore`.
+
+### `runtime.runAgent({ agent, prompt, model })`
+
+Creates a fresh session, runs one turn, and resolves the final result.
+
+### `runtime.resumeAgent({ sessionID, prompt?, agent?, model?, includeSubagents? })`
+
+Reopens an existing session and optionally starts another turn on it.
+
 ### `session.query(prompt, options)`
 
 Starts one turn on the session.
+
+- pass `includeSubagents: true` to receive descendant subagent-session events in the same stream
+- to let a subagent launch more subagents, configure that agent's `permission.task`
 
 ### `session.receiveResponse()`
 
@@ -179,7 +246,7 @@ Consumes the active turn as an async stream of normalized events:
 
 `receiveResponse()` is single-consumer per turn.
 
-### `session.run(prompt, options)`
+### `session.runAgent(prompt, options)`
 
 Convenience helper that internally calls `query()` and consumes the response stream until a final result is available.
 
@@ -212,9 +279,24 @@ Emitted for prompt failures, session errors, SSE errors, or shutdown problems.
 
 Emitted exactly once when the final assistant message can be resolved.
 
+## Source Metadata
+
+Every normalized event now includes a `source` object describing where it came from.
+
+- `source.agentType`: raw agent name such as `build`, `general`, or `explore`
+- `source.agentLabel`: display label with sibling ordinal when needed, such as `general#2`
+- `source.chainText`: readable lineage such as `build -> general#2 -> explore#1`
+- `source.sessionID`: the session that produced the event
+- `source.parentSessionID`: parent session ID when the event came from a descendant session
+- `source.rootSessionID`: root session for the current lineage
+- `source.taskID`: session ID when the event came from a subagent task, otherwise `null`
+- `source.sourceToolCallID`: originating `task` tool call when known
+
+`event.agent` and `result.agent` are preserved for compatibility and match `source.agentType`.
+
 ## Notes
 
 - This SDK is higher-level than raw OpenCode, not a workflow engine.
-- It does not implement multi-agent orchestration for you.
+- It exposes OpenCode subagent lineage metadata, but it does not implement orchestration policy for you.
 - It does not aim for complete Claude SDK compatibility.
 - Model resolution order is: per-call override -> session default -> agent default -> runtime default -> OpenCode config.
