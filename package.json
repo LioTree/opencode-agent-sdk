@@ -1,6 +1,6 @@
 {
   "name": "@liontree/opencode-agent-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "High-level agent runtime built on top of @opencode-ai/sdk",
   "type": "module",
   "main": "./dist/index.js",
