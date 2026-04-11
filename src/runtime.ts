@@ -1,5 +1,6 @@
 import {
   createOpencode,
+  createOpencodeClient,
   type Event,
   type EventMessagePartDelta,
   type EventMessagePartUpdated,
@@ -1186,6 +1187,19 @@ export class OpencodeAgentRuntime {
 
 export async function createAgentRuntime(options: AgentRuntimeOptions) {
   const agents = options.agents ?? {}
+  if (options.serverUrl) {
+    if (typeof options.hostname === "string" || typeof options.port === "number" || typeof options.timeoutMs === "number") {
+      throw new Error("serverUrl cannot be combined with hostname, port, or timeoutMs")
+    }
+
+    const client = createOpencodeClient({
+      baseUrl: options.serverUrl,
+      directory: options.directory,
+    })
+
+    return new OpencodeAgentRuntime(client, options.directory, agents, undefined, options.model)
+  }
+
   const runtimeConfig = buildRuntimeConfig({
     agents,
     ...(options.config ? { config: options.config } : {}),

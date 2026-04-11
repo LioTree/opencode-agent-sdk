@@ -58,7 +58,7 @@ This package declares `@opencode-ai/sdk` and `opencode-ai` as dependencies, so y
 npm install @liontree/opencode-agent-sdk
 ```
 
-See `examples/subagents.ts` for a complete subagent lineage and `resumeAgent()` example.
+See `examples/subagents.ts` for a complete subagent lineage and `resumeAgent()` example, and `examples/attach.ts` for attaching to an existing OpenCode server.
 
 ```ts
 import { createAgentRuntime } from "@liontree/opencode-agent-sdk"
@@ -138,6 +138,18 @@ const runtime = await createAgentRuntime({
 })
 ```
 
+If you already have an OpenCode server running, attach to it with `serverUrl`:
+
+```ts
+const runtime = await createAgentRuntime({
+  directory: "/app",
+  serverUrl: "http://127.0.0.1:40937",
+  model: "openai/gpt-5.4",
+})
+```
+
+In attach mode, `model` still works as a local default and is sent with each prompt. Other runtime config such as `config`, `mcp`, `permission`, and `rawConfigContent` is not pushed into the existing server.
+
 If you only need the final answer instead of a streamed event loop, use `runAgent()`:
 
 ```ts
@@ -199,13 +211,12 @@ Use `config.agent.<name>.permission.task` when you want to override a built-in a
 
 ### `createAgentRuntime(options)`
 
-Creates a managed OpenCode runtime and injects:
+Creates an OpenCode runtime in one of two modes:
 
-- agent prompts
-- optional default model
-- optional MCP config
-- optional permission config
-- optional extra config merged with inherited inline config
+- managed mode: starts and manages an OpenCode server, then injects agent prompts, optional default model, optional MCP config, optional permission config, and optional extra config merged with inherited inline config
+- attach mode: connects to an existing OpenCode server with `serverUrl`
+
+Attach mode does not push `config`, `mcp`, `permission`, or `rawConfigContent` into the existing server. `model` still works as a local default and is sent with each prompt. `serverUrl` cannot be combined with `hostname`, `port`, or `timeoutMs`.
 
 ### `runtime.createSession({ agent, model })`
 

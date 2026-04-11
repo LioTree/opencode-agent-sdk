@@ -32,6 +32,7 @@ export type AgentRuntimeOptions = {
   permission?: JsonObject
   port?: number
   rawConfigContent?: string
+  serverUrl?: string
   timeoutMs?: number
 }
 
