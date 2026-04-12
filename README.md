@@ -148,7 +148,7 @@ const runtime = await createAgentRuntime({
 })
 ```
 
-In attach mode, `model` still works as a local default and is sent with each prompt. Other runtime config such as `config`, `mcp`, `permission`, and `rawConfigContent` is not pushed into the existing server.
+In attach mode, `model` still works as a local default and is sent with each prompt. Per-turn `variant` overrides are also sent with the prompt. Other runtime config such as `config`, `mcp`, `permission`, and `rawConfigContent` is not pushed into the existing server.
 
 If you only need the final answer instead of a streamed event loop, use `runAgent()`:
 
@@ -156,6 +156,17 @@ If you only need the final answer instead of a streamed event loop, use `runAgen
 const result = await session.runAgent("Summarize the current repository")
 
 console.log(result.text)
+```
+
+To switch model variants for a single turn, pass `variant` in the per-call options:
+
+```ts
+const result = await runtime.runAgent({
+  agent: "general",
+  model: "openai/gpt-5.4",
+  variant: "high",
+  prompt: "Analyze the repository's test strategy",
+})
 ```
 
 To stream descendant subagent activity in the same turn, pass `includeSubagents: true` and read `event.source.chainText`:
@@ -216,7 +227,7 @@ Creates an OpenCode runtime in one of two modes:
 - managed mode: starts and manages an OpenCode server, then injects agent prompts, optional default model, optional MCP config, optional permission config, and optional extra config merged with inherited inline config
 - attach mode: connects to an existing OpenCode server with `serverUrl`
 
-Attach mode does not push `config`, `mcp`, `permission`, or `rawConfigContent` into the existing server. `model` still works as a local default and is sent with each prompt. `serverUrl` cannot be combined with `hostname`, `port`, or `timeoutMs`.
+Attach mode does not push `config`, `mcp`, `permission`, or `rawConfigContent` into the existing server. `model` still works as a local default, and per-turn `variant` overrides are sent with each prompt. `serverUrl` cannot be combined with `hostname`, `port`, or `timeoutMs`.
 
 ### `runtime.createSession({ agent, model })`
 
@@ -230,11 +241,11 @@ Opens an existing OpenCode session and returns an `OpencodeAgentSession` handle.
 
 Lists the agents currently available from the OpenCode runtime, including built-in subagents such as `general` and `explore`.
 
-### `runtime.runAgent({ agent, prompt, model })`
+### `runtime.runAgent({ agent, prompt, model, variant })`
 
 Creates a fresh session, runs one turn, and resolves the final result.
 
-### `runtime.resumeAgent({ sessionID, prompt?, agent?, model?, includeSubagents? })`
+### `runtime.resumeAgent({ sessionID, prompt?, agent?, model?, variant?, includeSubagents? })`
 
 Reopens an existing session and optionally starts another turn on it.
 
@@ -243,6 +254,7 @@ Reopens an existing session and optionally starts another turn on it.
 Starts one turn on the session.
 
 - pass `includeSubagents: true` to receive descendant subagent-session events in the same stream
+- pass `variant` to choose a model variant for that turn, such as `"low"` or `"high"`
 - to let a subagent launch more subagents, configure that agent's `permission.task`
 
 ### `session.receiveResponse()`
@@ -259,7 +271,7 @@ Consumes the active turn as an async stream of normalized events:
 
 ### `session.runAgent(prompt, options)`
 
-Convenience helper that internally calls `query()` and consumes the response stream until a final result is available.
+Convenience helper that internally calls `query()` and consumes the response stream until a final result is available. It accepts the same per-turn options as `query()`, including `variant`.
 
 ### `session.abort()` / `session.interrupt()`
 
@@ -310,4 +322,5 @@ Every normalized event now includes a `source` object describing where it came f
 - This SDK is higher-level than raw OpenCode, not a workflow engine.
 - It exposes OpenCode subagent lineage metadata, but it does not implement orchestration policy for you.
 - It does not aim for complete Claude SDK compatibility.
+- `variant` is a per-turn override only. Supported variant names depend on the selected model/provider and OpenCode configuration.
 - Model resolution order is: per-call override -> session default -> agent default -> runtime default -> OpenCode config.

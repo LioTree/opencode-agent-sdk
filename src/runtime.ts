@@ -276,6 +276,7 @@ class ActiveTurn {
       prompt: string
       runtime: OpencodeAgentRuntime
       sessionID: string
+      variant?: string
     },
   ) {
     this.worker = this.run()
@@ -672,6 +673,7 @@ class ActiveTurn {
           providerID: this.args.model.providerID,
           modelID: this.args.model.modelID,
         },
+        ...(this.args.variant ? { variant: this.args.variant } : {}),
         parts: [{ type: "text", text: this.args.prompt }],
       })
 
@@ -777,6 +779,7 @@ export class OpencodeAgentSession {
         prompt,
         runtime: this.runtime,
         sessionID: this.id,
+        ...(options.variant ? { variant: options.variant } : {}),
       })
     } finally {
       this.startingTurn = false
@@ -1162,7 +1165,9 @@ export class OpencodeAgentRuntime {
       ...(options.model ? { model: options.model } : {}),
     }
     const session = await this.createSession(sessionOptions)
-    return session.run(options.prompt)
+    return session.run(options.prompt, {
+      ...(options.variant ? { variant: options.variant } : {}),
+    })
   }
 
   async runAgent(options: AgentRuntimeRunOptions) {
@@ -1179,6 +1184,7 @@ export class OpencodeAgentRuntime {
         ...(options.agent ? { agent: options.agent } : {}),
         ...(typeof options.includeSubagents === "boolean" ? { includeSubagents: options.includeSubagents } : {}),
         ...(options.model ? { model: options.model } : {}),
+        ...(options.variant ? { variant: options.variant } : {}),
       })
     }
     return session

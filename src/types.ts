@@ -43,6 +43,7 @@ export type AgentSessionOptions = {
 
 export type AgentQueryOptions = AgentSessionOptions & {
   includeSubagents?: boolean
+  variant?: string
 }
 
 export type AgentRunOptions = AgentQueryOptions
@@ -51,12 +52,14 @@ export type AgentRuntimeRunOptions = {
   agent: string
   model?: ModelReference
   prompt: string
+  variant?: string
 }
 
 export type ResumeAgentOptions = AgentSessionOptions & {
   includeSubagents?: boolean
   prompt?: string
   sessionID: string
+  variant?: string
 }
 
 export type AgentErrorInfo = {
